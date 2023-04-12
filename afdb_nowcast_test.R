@@ -2,7 +2,7 @@
 options(future.globals.maxSize= 891289600, future.rng.onMisuse = "ignore")
 if("librarian" %in% rownames(installed.packages()) == FALSE) {install.packages("librarian")}
 librarian::shelf(here, tidyverse, dhopp1/nowcastLSTM, beepr, furrr, corrr, progressr, caret) 
-# Note that some required sub-dependencies may need to be updated for packages to work. This will return a warning. If this is the case, it is best to restart the session and install the packages mentioned in the warning separately.
+# Note that some required sub-dependencies may need to be updated for packages to work. This will return a warning. If this is the case, it is best to restart the session and install the packages mentioned in the warning separately. 
 
 future::plan(multisession, workers = max(availableCores(),1)) # Helps to speed up certain processes
 

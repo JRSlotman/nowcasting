@@ -3,7 +3,7 @@ mu_fit <- function(preds){sqrt(mean((0 - preds$actuals) ^ 2, na.rm = TRUE))}
 
 remove_outliers_mad <- function(x){if(is.numeric(x)){x[abs(x - median(x))/mad(x, na.rm = TRUE) > 3] <- NA}; return(x)}
 remove_outliers_z <- function(x){if(is.numeric(x)){x[abs(x - mean(x, na.rm = TRUE))/sd(x, na.rm = TRUE) > 3] <- NA};  return(x)}
-# sufficient_coverage <-function(x){ 
+# sufficient_coverage <-function(x){
 #     # Select only features with more than ten observations, and at least one observation 15 years before end date and at least one observation within two years of end date
 #     sum(!is.na(x)) > 10 || 
 #     min(which(!is.na(x))) < nrow(countrydata)-180 ||

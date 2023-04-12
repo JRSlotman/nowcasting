@@ -2,7 +2,7 @@
 options(readr.show_types = FALSE)
 if("librarian" %in% rownames(installed.packages()) == FALSE) {install.packages("librarian")}
 librarian::shelf(here, tidyverse, readxl, lubridate, countrycode, fredr, furrr, zoo, broom, WDI, gam)
-fredr_set_key(read.table(here("Data", "fred_key.txt"))[[1]]) # Obtained from FRED website
+fredr_set_key(read.table(here("Data", "fred_key.txt"))[[1]]) # Obtained from FRED website 
 
 #### Read and combine data ####
 
