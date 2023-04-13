@@ -138,6 +138,8 @@ if(T){
     # left_join(fred_complete, by = "date") %>% 
     # select(where(function(x)!all(is.na(x))))
   
+  rm(afdb_cpi, fao_production, fred_indicators, haver, wb_long, wdi)
+  
   return(data)
 }
 
