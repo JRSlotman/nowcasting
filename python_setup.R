@@ -1,5 +1,10 @@
+# Before running the code below, try following the installation instructions on this Github page: https://github.com/dhopp1/nowcastLSTM.
+# In case you run into issues with the Python environment, you can use the code below. 
+# The main difference with the instructions provided by Hopp is an alternative specification to the relevant Python path. 
+# If this still does not work, you should report your issue on the Github page to request Hopp’s support.
+
 if("librarian" %in% rownames(installed.packages()) == FALSE) {install.packages("librarian")}
-librarian::shelf(here, devtools, reticulate)
+librarian::shelf(here, renv, devtools, reticulate)
 devtools::install_github("dhopp1/nowcastLSTM") # Only first time
 
 install_miniconda(path = miniconda_path(), update = TRUE, force = FALSE)

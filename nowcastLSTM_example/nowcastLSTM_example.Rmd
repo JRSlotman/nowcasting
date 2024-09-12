@@ -1,0 +1,327 @@
+---
+title: "Example usage of nowcastLSTM library"
+author: ""
+output:
+  html_document:
+    toc: true
+    code_folding: show
+  pdf_document: default
+---
+
+# Use of the library in R
+
+This R library uses the [reticulate](https://rstudio.github.io/reticulate/articles/calling_python.html) library to call Python from R. No Python knowledge is necessary to use the library, however Python and a few Python libraries do need to be installed on your system for use. Follow install instructions in the README.
+
+# Basic model usage
+**\*note*** the model assumes stationary, seasonally adjusted series. So make sure required transformations are already performed by this point.
+<br><br>
+Data should be a dataframe with rows of the highest granularity of data and a date column. For example, predicting a yearly variable with monthly, quarterly, and yearly features should have a monthly dataframe. Quarterly variables should be represented as a single value during the period, with missings (`NA`) in between. E.g. Q1 data would be `NA` for January, `NA` for February, the value for March, etc. Yearly data would be `NA` for January - November, and the value for December.
+
+```{r eval = T, message=F, warning=F}
+library(nowcastLSTM)
+# tidyverse is not required for the library, it is just used to help with analysis in this example
+library(tidyverse)
+
+# this function should be run to initialize the Python environment at the beginning of each sessions
+initialize_session()
+
+# use the python_path parameter to point to your Python installation if reticulate doesn't find it by default
+# initialize_session(python_path = "path_to/python")
+
+# you can set the location of Python permanently by running the following
+# Sys.setenv(RETICULATE_PYTHON = "path_to/python")
+```
+
+```{r eval = T, message=F, warning=F}
+# reading in the data
+data <- read_csv("C:/Users/jrslo/OneDrive/Documents/R/Nowcasting/nowcastLSTM_example/data.csv") # make sure the date column is stored as a Date, if not already in the data read step
+data <- data %>% 
+  select(date, x_jp, x_world, x_de, x_uk, ipi_cn, x_vol_world2) # random subset of columns for simplicity
+train_end_date <- "2017-12-01" # training data through 2017
+training <- data %>% 
+  filter(date <= train_end_date)
+```
+
+Note on the `python_model_name` parameter of the `LSTM()` and `load_lstm()` functions. Due to a quirk of working with a simultaneous Python and R environment, to avoid confusion later on if working with multiple models simultaneously, this parameter should be set to the same name as used for the assigned R object. In this case, we are assigning the model to the object `model` in R, so we should pass `"model"` to the `python_model_name` parameter for consistency.
+
+```{r eval = T, message=F, warning=F}
+# instantiating a model with 10 networks based on the previous 12 months with 50 train episodes. Defaults to mean-filling missing values. See documentation for more information on hyper-parameters.
+model <- LSTM(
+  data=training, 
+  target_variable="x_world", 
+  n_timesteps=12, 
+  n_models=10, 
+  train_episodes=50, 
+  python_model_name="model"
+)
+```
+
+```{r eval = T, message=F, warning=F}
+# getting predictions on the train set
+train_preds <- predict(model, training, only_actuals_obs=TRUE) # only_actuals_obs=True to only get predictions where there are actuals present
+```
+
+```{r eval = T, message=F, warning=F}
+# plotting predictions on the train set
+train_preds %>% 
+  gather(label, value, -date) %>% 
+  ggplot() + 
+  aes(x=date, y=value, color=label) %>% 
+  geom_line()
+```
+
+```{r eval = T, message=F, warning=F}
+# getting predictions on the test set
+# passing the full dataset, then filtering only for predictions on dates the model wasn't trained on
+test_preds <- predict(model, data, only_actuals_obs=TRUE) %>% 
+  filter(date > train_end_date)
+```
+
+```{r eval = T, message=F, warning=F}
+# plotting predictions on the test set
+test_preds %>% 
+  gather(label, value, -date) %>% 
+  ggplot() + 
+  aes(x=date, y=value, color=label) %>% 
+  geom_line()
+```
+
+```{r eval = T, message=F, warning=F}
+# saving a trained model. The filename should end in ".pkl"
+save_lstm(model, "trained_model.pkl")
+```
+
+```{r eval = T, message=F, warning=F}
+# loading a trained model. The python_model_name should match the R object name it is being assigned to for clarity.
+trained_model <- load_lstm("trained_model.pkl", python_model_name="trained_model")
+```
+
+# Realistic model evaluation scenario
+The test set above assumes full data for each test observation, this is rarely the case with economic data. The process below outlines how to check the performance of the model on different data vintages, i.e. how the data would have looked at various points in time leading up to the prediction period.
+
+### pub_lags
+This is a vector of dimensions 1 x n_features. I.e. the number of independent variables in the model, this means NOT including the target variable. So for a model with a 200 x 10 dataframe, with 200 observations and 10 columns, the pub_lags vector should have 9 entries, one for each variable less the target column.
+<br><br>
+Its function is to provide the publication lag/schedule for each series to be able to generate data vintages via the `gen_ragged_X` function. The contents should therefore be the number of periods of lag each series experiences when published. For example, if there are three independent variables in a monthly model, GDP, exports, and the business confidence index, and they are published with a 3, 2, and 1 month lag, respectively, the lag vector should read `[3,2,1]`, or in whatever order the columns are in the original dataframe. If the target period is June, values with a lag of 2 are available until April. A value of 1 means values are available to May. A lag value of 0 means that if we are in June, June values are available. 
+<br><br>
+The units of the lag is the units of the original dataframe, i.e. the highest granularity of data. The monthly example above should then be extrapolated for the case of e.g. daily or quarterly data.
+
+```{r eval = T, message=F, warning=F}
+# same data and variables as before
+# example publication lags. Means x_jp comes out 1 month later, x_de 0 months later, x_uk 2 months later, ipi_cn 3 months later, x_vol_world2 3 months later
+pub_lags <- list(1, 0, 2, 3, 3)
+```
+
+```{r eval = T, message=F, warning=F}
+# training a new model with the default parameters
+model <- LSTM(data=training, "x_world", n_timesteps=12, n_models=10)
+```
+
+### model assessment on vintages
+The first testing example in this notebook made predictions on full datasets, i.e as if the lags for all variables was 0. This is an unrealistic scenario, so a better evaluation of a nowcasting model's performance is testing it on incomplete datasets that reflect real data publication conditions. The code below therefore uses the `pub_lags` vector and the `ragged_preds` function to create vintage datasets to test on. The below example will find performance of the model as if predictions were made 1, 2, and 3 months before the target period, in the target period, and 1 month after the target period. The appropriate prediction periods should be chosen as relevant for the use case of the nowcast. Testing continues after the target period because of publication lags. If we are nowcasting Q2 numbers and are in June, that does not mean that we have full data for June. Some figures from Q2 months may not come out until July or August, therefore the testing on vintages past the target period.
+
+### ragged_preds
+This function creates data vintages using a publication schedule, `pub_lags` vector, explained above, then generates predictions on these ragged datasets. The second parameter, `lag`, is the simulated period offset. It can be interpreted as the last period with full data relative to the target period. If we are nowcasting Q2, i.e. June, a lag of 0 simulates being in June. I.e. June is the last month with full data (for variables with lag 0). A lag of -1 simulates being in May, where May is the last full month. A lag of 1 simulates being in July, where variables with a lag of 1 now have June data as well. How many missings will be generated for a series can be calculated with `-1*(lag - variable_pub_lag)`. E.g. we set the lagged period to -2 months back, and the variable has a 1 month publication lag, `-1*(-2-1)=3`, so the last three months will be set to missing. The `data` parameter should be passed the dataset to predict, if different from the dataset the model was trained on. 
+<br><br>
+**note** if `"ARMA"` is chosen for `fill_ragged_edges_func`, `ragged_preds` will take significantly longer to calculate, as ARMA models have to be fit on every observation's data vintages.
+<br><br>
+Generally we should expect to see evaluation metrics get better the further ahead in time we move, as more data is available.
+
+```{r eval = T, message=F, warning=F}
+# performance on a single vintage, 2 months back of target period
+period_lag <- -2
+test_preds <- ragged_preds(
+  model = model,
+  pub_lags = pub_lags,
+  lag = period_lag,
+  data = data
+) %>% 
+  filter(date > train_end_date) # only interested in predictions after the train end date
+
+# different evaluation metrics
+RMSE <- sqrt(mean((test_preds$actuals - test_preds$predictions)**2))
+MAE <- mean(abs(test_preds$actuals - test_preds$predictions))
+
+print(str_interp("RMSE: ${round(RMSE, 4)}"))
+print(str_interp("MAE: ${round(MAE, 4)}"))
+```
+
+```{r eval = T, message=F, warning=F, fig.height=25, fig.width=7}
+# visualization of performance over time, to see how performance develops
+# 3 months back, 2 months back, 1 month back, month-of, 1 month ahead vintages
+p <- list()
+for (period_lag in c(-3, -2, -1, 0, 1)) {
+  test_preds <- ragged_preds(model=model, pub_lags=pub_lags, lag=period_lag, data=data) %>% 
+    filter(date > train_end_date)
+  
+  # different evaluation metrics
+  RMSE <- sqrt(mean((test_preds$actuals - test_preds$predictions)**2))
+  MAE <- mean(abs(test_preds$actuals - test_preds$predictions))
+  
+  p[[length(p)+1]] <- test_preds %>%
+    gather(label, value, -date) %>% 
+    ggplot() +
+    aes(x=date, y=value, color=label) + 
+    geom_line() + 
+    labs(title=str_interp("${period_lag} lag, RMSE: ${round(RMSE, 4)}, MAE: ${round(MAE, 4)}"))
+}
+ggpubr::ggarrange(p[[1]], p[[2]], p[[3]], p[[4]], p[[5]], nrow=5)
+```
+
+# Different filling NA options
+The default behavior of the model is to fill missings/NAs with the mean of the series. There are however other approaches, this section will outline different implementations available in the library.
+
+### 2 types of missing values:
+- _within-series missings_: E.g. quarterly data that is forced to be monthly will have NAs in between observations, or if a series just has some missing values within it. Fill these with the `fill_na_func` parameter in `LSTM` instantiation. The function must take a series and return a scalar, e.g. `np.nanmean`, `np.nanmedian`, etc.
+
+- _ragged edges_: I.e. observations that haven't come out yet because of publication lag. These happen exclusively at the end of the series. Fill these with the `fill_ragged_edges_func` parameter in `LSTM` instantiation. The function must take a series and return a scalar, e.g. `np.nanmean`, `np.nanmedian`, or enter `"ARMA"` to use ARMA estimation. Don't pass anything to use the same function as passed to `fill_na_func`.
+
+```{r eval = T, message=F, warning=F}
+# data setup
+data <- read_csv("data.csv") # make sure the date column is stored as a Date, if not already in the data read step
+data <- data %>% 
+  select(date, x_jp, x_world, x_de, x_uk, ipi_cn, x_vol_world2) # random subset of columns for simplicity
+features <- c("x_jp", "x_de", "x_uk", "ipi_cn", "x_vol_world2")
+```
+
+```{r eval = T, message=F, warning=F}
+# looking at the end of the dataset, we can see some ragged edges
+tail(data[,features], 10)
+```
+
+```{r eval = T, message=F, warning=F}
+# we can fill these using the mean of the series. 
+# x_vol_world2, a quarterly variable, has additionally had its within-series missings filled with the series mean as well
+tmp <- LSTM(data, "x_world", n_timesteps=12, fill_na_func="mean", n_models=1, train_episodes=1, python_model_name="tmp")$na_filled_dataset
+tmp <- data.frame(tmp[(dim(tmp)[1]-9):dim(tmp)[1],1:(dim(tmp)[2]-1)])
+colnames(tmp) <- features
+tmp
+```
+
+```{r eval = T, message=F, warning=F}
+# ragged edges can also be filled by ARMA estimation, in the below example ARMA parameters were estimated using `pmdarima.arima.auto_arima` then fit to the data to fill ragged edges
+# ragged edges have now been filled using ARMA models for each series. x_vol_world2 within-series missings continue to be filled in with the series mean as passed to the `fill_na_func`
+tmp <- LSTM(data, "x_world", n_timesteps=12, fill_na_func="mean", fill_ragged_edges="ARMA", n_models=1, train_episodes=1)$na_filled_dataset
+tmp <- data.frame(tmp[(dim(tmp)[1]-9):dim(tmp)[1],1:(dim(tmp)[2]-1)])
+colnames(tmp) <- features
+tmp
+```
+
+### Also used in `gen_ragged_X`/`ragged_preds` functions
+The ragged edges NA-filling parameters specified in model instantiation are also used in the ragged functions, which artifically create ragged edges based on publication lags.
+
+
+```{r eval = T, message=F, warning=F}
+# time can be saved by passing dates to `start_date` and/or `end_date` on `ragged_preds` to only generate ragged predictions for e.g. a test set, not all dates
+# ragged predictions on all dates
+ragged_preds(model, pub_lags, lag=-1, data=data) %>% head()
+```
+
+```{r eval = T, message=F, warning=F}
+# time can be saved by passing dates to `start_date` and/or `end_date` on `ragged_preds` to only generate ragged predictions for e.g. a test set, not all dates
+# this is more important for models that use ARMA ragged edge filling, since these take longer to generate the artificial vintages
+# ragged predictions on all dates
+ragged_preds(model, pub_lags, lag=-1, data=data, start_date = "2018-03-01", end_date = "2019-12-01")
+```
+
+# Generating news / causal inference
+The library provides a means of getting some causal inference on the change in the LSTM's outputs as new data are released, similar in concept to the [Fed's nowcasts](https://www.newyorkfed.org/research/policy/nowcast.html), which use dynamic factor models. Given an old and a new data release, the model's predictions will change. The method of generating each variable's contribution to this change is the following: for each column with new data, that data is held out of the latest dataset, then predictions are gotten. The difference between this prediction and the prediction with the full new dataset is considered this variable's contribution to the change in prediction. The process is repeated for all variables, and finally the process is run for the new dataset, but with all data that was missing in the old dataset missing as well. In this way, the contribution of data revisions can be ascertained. These contributions are the "news" column of the "news" dataframe output by the function. These are then scaled so that their sum equals the actual difference between old and new predictions. In most cases, this scaling factor, the "holdout_discrepency" of the function output, should be close to 1.
+
+```{r eval = T, message=F, warning=F}
+model <- LSTM(
+  data=training, 
+  target_variable="x_world", 
+  n_timesteps=12, 
+  n_models=10, 
+  train_episodes=50, 
+  python_model_name="model"
+)
+```
+
+```{r eval = T, message=F, warning=F}
+# new data is our latest dataset
+new_data <- data.frame(data)
+# old data is our previous dataset
+old_data <- data.frame(data)
+old_data[old_data$date >= "2020-09-01", c("x_jp", "x_de")] <- NA
+old_data[old_data$date == "2020-08-01", "x_jp"] <- 0.062
+```
+
+Our old data (e.g. last week's data) didn't have data for x_de or x_jp for September 2020, while it had a higher value for x_jp in August 2020, which was revised downwards in the latest data. Make sure both datasets have the target period in them, add the time periods necessary (with missings for all variables) if they are missing from one or the other dataset.
+
+```{r eval = T, message=F, warning=F}
+tail(old_data)
+```
+
+Our new data has new information, so new data were released.
+
+```{r eval = T, message=F, warning=F}
+tail(new_data)
+```
+
+We can run the `gen_news` function to see the impact of these changes on the model's prediction
+
+```{r eval = T, message=F, warning=F, }
+options(scipen=999)
+news <- gen_news(model, target_period="2020-09-01", old_data=old_data, new_data=new_data)
+news$news
+```
+
+We can also get the old prediction and the new prediction, as well as the holdout discrepency from the "news" dictionary object
+
+```{r eval = T, message=F, warning=F}
+print(news)
+```
+
+The sum of the "scaled_news" column should sum to exactly the difference between the old and new predictions
+
+```{r eval = T, message=F, warning=F}
+print(str_interp("Sum of the (unscaled) news column: ${round(sum(news$news$news), 8)}"))
+print(str_interp("Sum of the scaled news column: ${round(sum(news$news$scaled_news), 8)}"))
+print(str_interp("Difference between old and new predictions:: ${round(news$new_pred - news$old_pred, 8)}"))
+```
+
+If we want to generate news for December 2020 predictions (Q4), we have to first add that date to both datasets
+
+```{r eval = T, message=F, warning=F}
+tail(new_data)
+```
+
+```{r eval = T, message=F, warning=F}
+# add one more month to the data
+library(lubridate)
+new_data[nrow(new_data)+1, "date"] <- new_data[nrow(new_data), "date"] %m+% months(1)
+old_data[nrow(old_data)+1, "date"] <- old_data[nrow(old_data), "date"] %m+% months(1)
+tail(new_data)
+```
+
+```{r eval = T, message=F, warning=F}
+news <- gen_news(model, "2020-12-01", old_data, new_data)
+news$news
+```
+
+# Feature importance / contribution, model selection, variable selection, and hyperparameter tuning
+For more information on the theory and implications of these function, see the relevant sections of the Python example file [here](https://github.com/dhopp1/nowcastLSTM/blob/main/nowcastLSTM_example.html). Specifics of the functions' use in R will shortly be discussed here.
+
+To obtain feature contribution for a model, the syntax is `model$feature_contribution()` on a model. In the `hyperparameter_tuning` and `select_model` functions, pass hyperparameter options as an R vector, e.g., `select_model(..., n_layers_grid = c(1,2,4), ...)`. The last topic worth mentioning is that progress for these functions may not print to the console in R studio, only printing once the function is done running. This problem goes away when running the code from the command line via `Rscript`, so if variable selection or hyperparameter tuning is performed that may take a long time, it is recommended to run this as a script to be able to see progress, then save output dataframes / columns to CSVs to be able to analyze the data when the run is finished.
+
+# Uncertainty intervals
+An important component of using the predictions of any model is uncertainty. The _nowcastLSTM_ library has functionality built in to approximate uncertainty via the `interval_predict()` and `ragged_interval_predict()` functions. It is important to note that this particular implementation is still in testing and validation.
+
+There are several approaches to quantifying uncertainty in a neural network's predictions. One approach is to use dropout between hidden layers as a Bayesian approximator. For more information, see this or this paper. In this case, the approach was not suitable because LSTM networks with only one hidden layer are viable and often well-performing models. In this case, there is nowhere to perform dropout. Alternatively, the network could be reworked into a Bayesian Neural Network (BNN). For more information, see this paper. However, this would require an extensive overhaul of the existing modelling framework just to get uncertainty intervals. Therefore, an implementation that could be applied to the existing architecture was needed.
+
+In the nowcasting case, there are two main types of uncertainty which need to be captured:
+
+- **data availability uncertainty**: this uncertainty captures the fact that at different times during the prediction period there are differing amounts of information available to the model. Early in the prediction period, there may be almost no information available, nothing has been published yet. At the end of the prediction period, almost all of the data is available to the model. This uncertainty should then decrease as more and more information becomes available.
+- **model uncertainty**: this captures the inherent uncertainty of the model given the underyling data. This is sometimes referred to as epistemic uncertainty. It could be due to a lack of training data or lack of relevant input variables.
+
+The first type of uncertainty is approximated in the library by combining the proportion of data available to the model with the standard deviation of the target variable. For instance, at an early period with zero data available to the model, it will only be able to predict the target series mean. What should the uncertainty interval be in this case? If we specify an interval of 0.95 (95%), assuming the target variable is normally distributed, that means if we take 1.96 standard deviations from either side of the series mean, we should cover about 95% of historical observations. If we specify an interval of 0.99 (99%), if we take 2.58 standard deviations from either side of the series mean, we should cover about 99% of historical observations. With no other information to go on, this is a reasonable starting point for our uncertainty intervals.
+
+As more information is published, we can reduce this uncertainty as the model takes into account the new information. In the library, this is implemented by multiplyling this interval by the percent of data missing from the model for inference. With a 0.95 interval, when 0% of the data is available for inference, 1.96 standard deviations of the target series will be added and subtracted from the upper and lower quantiles of the networks' predictions (more information below). When 50% is available, 0.98 standard deviations will be added and subtracted, etc. This percent available figure can be weighted by the relative importance of each variable, i.e., feature contribution. E.g., if a model has two input variables, _x_ and _z_, and _x_ has 50% of its data available and _z_ has 75% available, with equal weighting the model would have 62.5% of data available to it. However, if _x_'s feature contribution is twice as high as _z_'s, implying it is a more important variable, we can apply these weights and get a more refined availabilty of 58.3%. The library can use either weighting scheme, passing _"fc"_ to the _data\_availability\_weight\_scheme_ parameter in the _interval\_predict()_ and _ragged\_interval\_predict()_ functions for feature contributed weighting and "equal" for equal variable weighting.
+
+Luckily, neural networks already have an inbuilt method of approximating model uncertainty. Because the models are stochastic, different networks trained on the same data will produce different estimates. These different estimates can be interpreted as a Gaussian prediction interval. We can then take the quantiles (e.g., 97.5 and 2.5 percentiles for a 0.95 interval) of these different estimates as a measure of model uncertainty. **To improve both prediction and interval qualities, use more networks when training (the n_models parameter in LSTM). At least 10 models, potentially even 100 or more**.
+
+By combining these two uncertainties together, we can obtain uncertainty intervals. The two are combined by adding and subtracting the data availability adjustment to/from the upper and lower quantiles of the networks' predictions. As a result, the upper and lower intervals may not be symmetric. But as n_models increases, the intervals will become more and more symmetric. The more data are published, data availability uncertainty will decrease, while model uncertainty may increase, decrease, or stay the same. Therefore, it is no guarantee that overall uncertainty intervals will decrease with more data. It may be that the decrease in data availability uncertainty is more than offset by model uncertainty. E.g., if the signals coming in from the new data are mixed or extreme, the networks may diverge in their predictions.
+
+For more information and practical examples, see the the relevant sections of the Python example file [here](https://github.com/dhopp1/nowcastLSTM/blob/main/nowcastLSTM_example.html).
+
